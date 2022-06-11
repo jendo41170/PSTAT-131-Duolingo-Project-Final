@@ -1,0 +1,988 @@
+---
+title: "PSTAT 131 Final: Duolingo"
+author: "Jenny Do" 
+output:
+    html_document:
+      toc: true
+      toc_float: true
+      code_folding: hide
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+## Background 
+
+As someone who speaks three languages (English, Cantonese, and Vietnamese), foreign languages have always peaked my interest. 
+
+Though English was not my first language (my first language is Cantonese - a form of Chinese that comes from Caton (Guangzhou) region), I excelled in the subject as I was learning it in school. I was also able to pick up Vietnamese (now fluent) while working a part-time job at a dim-sum restaurant throughout high school. 
+
+One thing that was always puzzling to me was that I could never learn Mandarin Chinese. For 10 years, I attended classes on Saturdays. Nothing ever stuck. 
+
+During the pandemic, after 6 years of not touching Mandarin, I decided to try again. To try to pull myself out of the boredom of quaratine, I decided to download Duolingo. I was immediately hooked. 
+
+### What is Duolingo?
+
+[Duolingo](https://www.duolingo.com/learn), is founded on the idea that learning a language should be fun. Offering 39 different languages, the app uses gamification, ![](images/gamification_duolingo.png) 
+learning science (AI to adapt the difficulty level base on your progress),
+![](images/learning_science.png) engaging designs, and a spaced repetition technique to provide users with the best language education possible. 
+
+To give a sense of the company's goals, demonstrate how the app works and showcase their (adorable) mascot Duo, here a few short videos: 
+
+<div align="center">
+<iframe width="560" height="315" src="https://www.youtube.com/embed/FtcNTRVxB-s" title="YouTube video player" frameborder="0" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" allowfullscreen></iframe>
+</div>
+
+<div align="center">
+<iframe width="560" height="315" src="https://www.youtube.com/embed/PzomGOEZFqo" title="YouTube video player" frameborder="0" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" allowfullscreen></iframe>
+</div>
+
+## Introduction 
+
+The purpose of this project is to generate a model that will predict the learning difficulty rating for a specific word in one of the six languages, German, English, Spanish, French, Italian and Portuguese.
+
+### Why might this model be useful? 
+
+Duolingo is already a company very centered around machine learning and improve their learning structures, this project may provide them more insight as they plan to expand their language selection. 
+
+For example, as a user myself, this model may produce information that informs me on mistakes I'm frequently making as a user (ie. need more focus on verbs, need more practice). 
+
+### Loading Data and Packages 
+
+This project uses a gzipped CSV file containing 13 million Duolingo student learning traces used in Settles and Meeder's 2016 [paper](https://github.com/duolingo/halflife-regression/blob/master/settles.acl16.pdf), "A Trainable Spaced Repetition Model for Language Learning".
+
+I was able to download the dataset on [Dataverse](https://dataverse.harvard.edu/dataset.xhtml?persistentId=doi:10.7910/DVN/N8XJME) (361 MB) and gather more information on variable format/usage in the released Duolingo [repository](https://github.com/duolingo/halflife-regression). 
+
+Here is a full copy of the codebook; though this is available in my zipped files, exposure to these variables will helpful for this report: 
+
+* `difficulty_rating` - generated from a ratio of `history_correct` over `history_seen`, it acts as a measure of accuracy for a specific word over all sessions for a particular user and word (unique to each language). Note that since there were multiple users studying the same word for the same language, we took an average over all the words that were the same. More information can be found in the "Creating Difficulty" section
+
+* `p_recall` - proportion of exercises from this lesson/practice where the word/lexeme was correctly recalled
+
+* `delta` - time (in seconds) since the last lesson/practice that included this word/lexeme
+
+* `learning_language` - language being learned
+
+* `lexeme_string` - lexeme tag, in the following format surface-form/lemma<pos>[<modifiers>...]
+
+* `surface_form` - refers to the inflected form seen in (or intended for) the exercise
+
+* `lemma` is the uninflected root
+
+* `pos` is the high-level part of speech, and each of the modifers encodes a morphological component specific to the surface form (tense, gender, person, case, etc.)
+
+* `history_seen` - total times user has seen the word/lexeme prior to this lesson/practice
+
+* `history_correct` - total times user has been correct for the word/lexeme prior to this lesson/practice
+
+* `session_seen` - times the user saw the word/lexeme during this lesson/practice
+
+* `session_correct` - times the user got the word/lexeme correct during this lesson/practice
+
+*Note: A full copy of the codebook is available in the zipped files.*
+
+```{r, message=FALSE, warning = FALSE}
+# Load needed packages 
+library(data.table)
+library(tidyverse)
+library(tidymodels)
+library(janitor)
+library(dplyr) 
+library(formattable)
+
+library(corrr)
+library(ranger)
+library(xgboost)
+library(kknn)
+library(vip)
+
+# set seed 
+set.seed(27)
+```
+
+```{r, message=FALSE, warning = FALSE}
+# read in data 
+# using the fread() function to open the zipped csv file 
+load_in <- fread("settles.acl16.learning_traces.13m.csv.gz") 
+```
+
+## Data Cleaning
+
+Even though the dataset was tidy straight from download (this was expected as it was used for experimentation by Duolingo), a few modifications still had to be made before the split could occur: 
+
+* 13 million observations would be overwhelming and unrealistic for my computer, therefore we will be cutting the dataset down to 250,000 observations. This will be done in a stratified manner (on `learning_language`). 
+
+```{r}
+# Only want about 250,000 observations, want to do this in a stratified manner 
+duolingo <- load_in %>% group_by(learning_language) %>% slice_sample(n=41667)
+table(duolingo$learning_language)
+```
+
+* As a check, run functions `is.na()` and `colSums()` to verify that there are truly no missing values in the dataset. 
+
+```{r}
+colSums(is.na(duolingo))
+```
+
+We can see from the output that there are no missing values. 
+
+* Clean Names. 
+
+```{r}
+duolingo <- duolingo%>%
+  clean_names() 
+```
+
+* Deselect variables that are not needed for our project. This would include `time_stamp`, `user_id`, `lexeme_id` and `ui_language`. 
+
+```{r}
+duolingo <- duolingo %>% 
+  select(-timestamp, -user_id, -lexeme_id, -ui_language)
+```
+
+* Convert `p_recall` (proportion of exercises from this lesson/practice where the word/lexeme was correctly recalled) into a percentage.  
+
+```{r}
+duolingo <- duolingo %>% 
+  mutate(
+    # convert p_recall into percent 
+    p_recall = as.numeric(p_recall*100)%>%
+    # want to make sure all numeric looking variables are numeric 
+    as.numeric(duolingo)
+  )
+```
+
+### Transforming `lexeme_string`
+
+* Here we want to convert `lexeme_string` into something more workable. First we will be splitting the string into separate variables `surface form`, `lemma`, and `pos` (part of speech).  
+
+```{r}
+duolingo <- duolingo%>%mutate(surface_form_lemma_pos = sub('^(.*?/.*?<.*?)>.*$', '\\1', lexeme_string),
+         surface_form_lemma_pos = gsub('<([^*]*)$', ';\\1', surface_form_lemma_pos)) %>%
+  separate(surface_form_lemma_pos, into = c('surface_form', 'lemma', 'pos'), sep = '/|;', remove = F) %>%
+  mutate(pos = ifelse(grepl('@', pos), 'missing', pos))
+
+duolingo <- duolingo%>%
+  mutate(surface_form = ifelse(grepl('<.+>', surface_form), lemma, surface_form))
+```
+
+* We find that some of the `lexeme_string` contains wildcard components, written as <\*...>. For example, <*sf> refers to a "generic" lexeme without any specific surface form (e.g., a lexeme tag that represents all conjugations of a verb: "run," "ran," "running," etc.). For this project we will be removing any rows that contain a wildcard component. In addition, we find that some of the `lexeme_string` contains '/'<apos>, the data source does not clearly state what this represents; therefore, again for this project we will be removing any rows that contain this component. 
+
+```{r}
+duolingo<-filter(duolingo, surface_form != "'",surface_form!="'s")
+duolingo<-duolingo[!grepl("<*sf>/abbassare;vblex", duolingo$surface_form_lemma_pos),]
+duolingo<-duolingo[!grepl("<*sf>/abbigliamento;n", duolingo$surface_form_lemma_pos),]
+duolingo<-duolingo[!grepl("<*sf>/abito;n", duolingo$surface_form_lemma_pos),]
+duolingo<-duolingo[!grepl("<*sf>/abogado;n", duolingo$surface_form_lemma_pos),]
+duolingo <- subset(duolingo, !grepl('^<', duolingo$surface_form_lemma_pos))
+```
+
+* After removing unwanted components from the `lexeme_string`, we want to sample the data again (using stratified sampling). This is so we get an even amount of languages. 
+
+Here we can see that our dataset will have total 180,000 observations, 30,000 observations for each language. 
+
+```{r}
+duolingo <- duolingo %>% group_by(learning_language) %>% slice_sample(n=30000)
+table(duolingo$learning_language)
+```
+
+### Creating Difficulty
+
+The variable `difficulty_rating` was created using the following steps: 
+
+(1) Create `p_recall_history`, for each individual observation look for the ratio between `history_correct` and `history_seen`.  
+
+(2) Use the aggregate function to create a "look up table" denoted as `difficulty_ratio` (for every unique surface form, average `p_recall_history` to create a difficulty for each unique surface form).  
+
+(3) Join the datasets `difficulty_ratio` and `duolingo` using the full_join function (group by `surface_form`).
+
+```{r}
+duolingo$p_recall_history <- (duolingo$history_correct/duolingo$history_seen)*100
+difficulty_ratio <- aggregate(p_recall_history~surface_form,data=duolingo,mean)
+duolingo <- full_join(duolingo,difficulty_ratio, by = "surface_form",all.x=TRUE, all.y=TRUE)
+```
+
+(4) Remove the first `p_recall_history`, re-add a column for `history_correct`/`history_seen` ratio.  
+
+```{r}
+duolingo <- duolingo %>% 
+  select(-p_recall_history.x)
+```
+
+```{r}
+duolingo$history_ratio <- (duolingo$history_correct/duolingo$history_seen)*100
+```
+
+(5) Rename the remaining `p_recall_history.y` column to be the `difficulty_rating`. We have now obtained a difficulty rating for each unique surface form in each language. 
+
+_Note: `difficulty_rating` is a percentage that indicates harder difficulty at lower percentages and easier difficulty at higher percentages._ 
+
+```{r}
+names(duolingo)[13] <- "difficulty_rating"
+```
+
+`difficulty_rating` is a variable of type numeric. 
+
+```{r}
+duolingo$difficulty_rating <- as.numeric(duolingo$difficulty_rating)
+```
+
+### Data Split 
+
+For splitting the data we will be using a 80/20 percentage split (80% for training, 20% for test). Stratified sampling was used as the `difficulty_rating` distribution was skewed.
+
+```{r}
+set.seed(27)
+duolingo_split <- duolingo %>% 
+  initial_split(prop = 0.8, strata = "difficulty_rating")
+
+duolingo_train <- training(duolingo_split)
+duolingo_test <- testing(duolingo_split)
+```
+
+Then using the `dim()` function, we can see that the training and test sets have the desired number of observations.
+
+The training data set has 143,999 observations and the testing data set has 36,001 observations.
+
+```{r}
+duolingo_split 
+
+dim(duolingo_train)
+dim(duolingo_test)
+```
+
+## Exploratory Data Analysis
+
+The EDA (exploratory data analysis) will be based on the *training data set*. This includes 143,999 observations. 
+
+### Difficulty Rating 
+
+Firstly, as our outcome was a metric we made, we want to explore it a little bit more. Lets take a look at the distribution of our outcome variable, `difficulty_rating`. 
+
+```{r}
+ggplot(duolingo_train, aes(difficulty_rating)) +
+  geom_histogram(bins = 70, color = "white") +
+  labs(
+    title = "Histogram of Difficulty Rating"
+  )
+```
+
+Looking at the histogram, the distribution is unimodal with a slight left skew (a tail extends to the left while most values are clustered on the right). The values are peaking around 87 to 90. 
+
+In addition, we note that `difficulty_rating` scores range from around 74 to 100. This is a good sign as it seems that Duolingo's methods are working; most students are retaining the words they are learning in each of the languages!
+
+To dive deeper, we can break this down into `difficulty_rating` by `learning_languages`. Recall we have six languages, German, English, Spanish, French, Italian and Portuguese. 
+
+```{r}
+ggplot(duolingo_train, aes(difficulty_rating)) +
+  geom_histogram(bins = 30, color = "white") +
+  facet_wrap(~learning_language, scales = "free_y") +
+  labs(title = "Histogram of Difficulty by Learning Language") 
+```
+
+Here we start to notice that difficultly may differ based on language. From a quick glance, we immediately note that French seems to be slightly more difficult than Italian. 
+
+To get a more accurate reading we can rigorously calculate the average difficulty rating for each of the following languages: 
+
+```{r}
+duolingo_train %>%
+  group_by(learning_language) %>%
+  summarise_at(vars(difficulty_rating), list(difficulty_rating = mean)) 
+```
+
+As we suspected from our plots above, French seems to be the most difficult language. This is then followed by Italian, Spanish, Portuguese, German then English. 
+
+I personally find it very interesting that English is ranked lowest in difficulty while French is ranked the highest. I always thought that English was one of the most difficult languages as it commonly features grammatical rules that are often broken. My suspicion is that the words in French might be from a more advanced/later part of the course, making it seems that it is more difficult.  
+
+Regardless we have now obtained a sort of ranking/idea of which languages seem harder than the others. 
+
+We can further explore this idea by looking at some relationships between our outcome variable and predictors. 
+
+### P_recall 
+
+Recall that the variable, `p_recall`, denotes the proportion of exercises from this lesson/practice where the word/lexeme was correctly recalled. 
+
+To explore this variable, I decided to take a "low, medium, high" approach, focused on each language. 
+
+```{r}
+p_recall_visual <- duolingo_train %>% 
+  mutate(cg = case_when(p_recall < 33 ~ "low",
+                        p_recall>=33 & p_recall <=66 ~ "med",
+                        p_recall > 66  ~ "high"))
+head(p_recall_visual)  
+```
+
+```{r}
+par(mfrow=c(2,2))
+
+p_recall_visual %>% filter(learning_language %in% c("de")) %>% ggplot(aes(cg, difficulty_rating))  +  geom_boxplot() + facet_wrap(~learning_language)
+
+p_recall_visual %>% filter(learning_language %in% c("en")) %>% ggplot(aes(cg, difficulty_rating))  +  geom_boxplot() + facet_wrap(~learning_language)
+
+p_recall_visual %>% filter(learning_language %in% c("es")) %>% ggplot(aes(cg, difficulty_rating))  +  geom_boxplot() + facet_wrap(~learning_language)
+
+p_recall_visual %>% filter(learning_language %in% c("fr")) %>% ggplot(aes(cg, difficulty_rating))  +  geom_boxplot() + facet_wrap(~learning_language)
+
+p_recall_visual %>% filter(learning_language %in% c("it")) %>% ggplot(aes(cg, difficulty_rating))  +  geom_boxplot() + facet_wrap(~learning_language)
+
+p_recall_visual %>% filter(learning_language %in% c("pt")) %>% ggplot(aes(cg, difficulty_rating))  +  geom_boxplot() + facet_wrap(~learning_language)
+```
+
+Looking at all the plots, one thing I noticed is that there are a lot of outliers. I believe this is due to how the plots were set up; I have decided that these values will still be included in the dataset. 
+
+The next thing I noticed is across all the plots the median of "high" is slightly greater than the medians for "low" and "medium". This was expected and serves as a good sign. It seems that Duolingo's methods are working; most students are recalling the words correctly in each of the languages. Moreover, I also noticed that the medians of "low" and "medium" were not far behind "high". This tells us that people are still learning words that are new to them. If the medians of "low" and "medium" were far greater than the median of "high", this could mean that people are not seeing new words or the practices are just too easy. 
+
+As this is not the case and the difference is very small, it seems as though Duolingo is trying to give an equal amount of old and new words (this is connected to how Duolingo uses AI to adapt the difficulty level to each users lesson based on their progress). Regardless I believe this is great as it makes the practices not too difficult and too easy. It piques the interest of users without leaving them discouraged. 
+
+### Delta 
+
+Another variable I was interested in studying was `delta`. This was the time (in seconds) since the last lesson/practice that included this word/lexeme. 
+
+To explore this variable, I decided to create scatterplots, focused on each language. 
+
+```{r}
+par(mfrow=c(2,2))
+
+duolingo_train %>% filter(learning_language %in% c("de")) %>% ggplot() + aes(difficulty_rating, delta) +  geom_point(color = "#F8766D") + facet_wrap(~learning_language)
+
+duolingo_train %>% filter(learning_language %in% c("en")) %>% ggplot() + aes(difficulty_rating, delta) +  geom_point(color = "#CD9600") + facet_wrap(~learning_language)
+
+duolingo_train %>% filter(learning_language %in% c("es")) %>% ggplot() + aes(difficulty_rating, delta) +  geom_point(color = "#00BE67") + facet_wrap(~learning_language)
+
+
+duolingo_train %>% filter(learning_language %in% c("fr")) %>% ggplot() + aes(difficulty_rating, delta) +  geom_point(color = "#00A9FF") + facet_wrap(~learning_language)
+
+duolingo_train %>% filter(learning_language %in% c("it")) %>% ggplot() + aes(difficulty_rating, delta) +  geom_point(color = "#C77CFF") + facet_wrap(~learning_language)
+
+duolingo_train %>% filter(learning_language %in% c("pt")) %>% ggplot() + aes(difficulty_rating, delta) +  geom_point(color = "#FF61CC") + facet_wrap(~learning_language)
+```
+
+Looking at all the plots, it seems that if `delta` was shorter (meaning less time has passed since the last lesson/practice that included this word/lexeme), the student was more likely to remember the word. This explains the high density of less difficult words. 
+
+Conversely, as `delta` increases (meaning more time has passed since the last lesson/practice that included this word/lexeme), we can see a less dense patch of less difficult words, at the top right of each of the graphs. 
+
+In addition, an observation we can make is that as `delta` gets larger, difficulty is still pretty low. This means that we are not seeing many difficult words with a high `delta`; the words are getting "downloaded" in the students long term memory. This result is expected and one the main points made in Settles and Meeder's paper on half-life regression. 
+
+This is what the authors called the "spacing effect" and the "lag effect". It is based on the idea that people tend to remember things more efficiently if they have spaced repetition practice as opposed to "cramming". Then people tend to learn better if the spacing between practices gradually starts to increase (ie. the lag). 
+
+Lastly, we notice that some words that have a high difficulty (low `difficulty_rating`) have a low `delta`. This indicates that most likely a new word has been introduced and the student is having a difficult time learning it for the first time; this makes sense. 
+
+Overall, I thought it was pretty cool that I was able to capture this idea visually in my plots! 
+
+### Part of Speech
+
+In the final section of the EDA, one aspect that truly sparked my interest was the part of speech for each word.
+
+It's fascinating to me that even though these are different languages, part of speech still has a large impact on how sentences are formed and the overall speed in a student's acquisition of proficiency in the use of the new language. 
+
+To explore this variable, I decided to create scatterplots, focused on each language and part of speech. 
+
+```{r}
+duolingo_train %>% filter(learning_language %in% c("de")) %>% ggplot() + aes(difficulty_rating, pos) +  geom_boxplot(color = "#F8766D") + facet_wrap(~learning_language)
+
+duolingo_train %>% filter(learning_language %in% c("en")) %>% ggplot() + aes(difficulty_rating, pos) +  geom_boxplot(color = "#CD9600") + facet_wrap(~learning_language)
+
+duolingo_train %>% filter(learning_language %in% c("es")) %>% ggplot() + aes(difficulty_rating, pos) +  geom_boxplot(color = "#00BE67") + facet_wrap(~learning_language)
+
+
+duolingo_train %>% filter(learning_language %in% c("fr")) %>% ggplot() + aes(difficulty_rating, pos) +  geom_boxplot(color = "#00A9FF") + facet_wrap(~learning_language)
+
+duolingo_train %>% filter(learning_language %in% c("it")) %>% ggplot() + aes(difficulty_rating, pos) +  geom_boxplot(color = "#C77CFF") + facet_wrap(~learning_language)
+
+duolingo_train %>% filter(learning_language %in% c("pt")) %>% ggplot() + aes(difficulty_rating, pos) +  geom_boxplot(color = "#FF61CC") + facet_wrap(~learning_language)
+```
+
+From all the plots, there are more nouns (np - proper noun and n - noun) in the lower level of difficulty while there are more more verbs, propositions and words with abstract (more niche) parts of speech in the higher levels of difficulty. 
+
+Again, this makes sense. From a general understanding of linguistics, nouns are often easier to learn than verbs (for example) as they are generally more concrete, intuitive and easier to perceive and individuate. Verbs, propositions and words with abstract parts of speech are more difficult to remember as they differ more in different contexts than nouns. 
+
+## Model Building 
+
+The model building process was a lot of tedious than I anticipated. I learned a lot as I worked through many computational hurdles. 
+
+I organized my R scripts in the following order: 
+
+1. Building the model 
+
+2. Testing the model 
+
+3. Running the model 
+
+4. Analyzing the model 
+
+### Building the Recipe and Tweaking the Data
+
+Even though I thought I my data was ready for building and fitting models during the EDA portion, there were still a few more adjustments to be made before this could happen. These are the steps I took to adjustment my data and build my recipe: 
+
+1. Read in the raw `.csv` training data 
+
+```{r}
+write.csv(duolingo_train,"~/Desktop/PSTAT 131 Machine Learning/PSTAT-131-Duolingo-Project/data/processed/duolingo_train.csv", row.names = FALSE)
+```
+
+2. Make a few more adjustments to what variables we will be including in our training set. This means removing `history_seen`, `history_correct` (these two variables were used to generate our outcome, `difficulty_rating` -- including these would skew our results) and `surface_form_lemma_pos` (includes information that is exactly the same as variables `surface_form`, `lemma` and `pos`). In addition we want to turn character variables (`learning_language`,`lexeme_string`, `surface_form`, `lemma` and `pos`) into factors.  
+
+```{r, message=FALSE}
+duolingo_train <- read_csv("~/Desktop/PSTAT 131 Machine Learning/PSTAT-131-Duolingo-Project/data/processed/duolingo_train.csv") %>% 
+  mutate(
+    learning_language = factor(learning_language), 
+    lexeme_string = factor(lexeme_string), 
+    surface_form = factor(surface_form),
+    lemma = factor(lemma),
+    pos = factor(pos)
+    ) %>% 
+  select(-history_seen, -history_correct, -surface_form_lemma_pos)
+```
+
+3. Fold the training data into 10 folds. 
+
+```{r}
+duolingo_folds <- vfold_cv(duolingo_train, v = 10 , strata = learning_language)
+```
+
+4. Create a recipe, which is detailed in comments below.
+
+```{r}
+duolingo_recipe <- recipe(
+  # predict difficulty_rating including the listed predictors 
+  difficulty_rating ~ delta + learning_language +  session_seen 
+  + session_correct + surface_form + lemma + pos, data = duolingo_train) %>%
+  # There were were many unique values in `surface_form` and `lemma`
+  # , both factors. Some of the levels did not have many observations in them. 
+  # To fix, we set threshold in step_other where if it was under a 
+  # certain number, it was pooled into "other".  
+  # This was done with trial and error - kept testing until the juice() and 
+  # bake() below looked satisfactory 
+  step_other(surface_form, threshold = 0.3) %>% 
+  step_other(lemma, threshold = 0.3) %>%
+  # One_hot encode all nominal predictors 
+  step_dummy(all_nominal_predictors(), one_hot = T) %>% 
+  # Center numerical predictors 
+  # Was advised to take out step_scale - was throwing an error 
+  step_center(delta,session_seen,session_correct)
+  #step_scale(all_predictors())
+```
+
+5. Checking the recipe to make sure everything looked satisfactory. Here I used the `juice()` function. A preview has been printed below. 
+
+Note: Could tell this was looking good because the number of columns significantly decreased. There were many levels that did not have a lot of observations in them; this was fixed with using the `step_other()` function in the recipe above. We were able to greatly reduce the number of levels of the particular variables. 
+
+```{r}
+duolingo_recipe %>% 
+  prep() %>% 
+  juice() %>% 
+  head()
+```
+
+6. Lastly, I saved the model building objects. This was then relocated manually into a folder called `/data`, sub-directory `/model_material`.
+
+This allows for the same information to be used in every R script. 
+
+```{r}
+save(duolingo_folds, duolingo_recipe, duolingo_train,file = "data/model_material/model_setup.rda")
+```
+
+(I also wanted this model-ready training set saved as a `.rds` file.)
+
+```{r}
+write_rds(duolingo_train, "data/processed/train_modelready.rds")
+```
+
+The saved `.rda` file included: 
+
+* The training data folds 
+
+* The recipe 
+
+* The training data with modifications made 
+
+The recipe and data set is now ready for specific models! 
+
+### Preparing & Testing the Models on a Smaller Sized Training Data-set 
+
+Firstly, load the required objects from above. This again includes the training data folds, the recipe, and the training dataset. 
+
+```{r}
+load("~/Desktop/PSTAT 131 Machine Learning/PSTAT-131-Duolingo-Project/data/model_material/model_setup.rda")
+```
+
+After discussing with several TAs and Professor Coburn, I decided to run stratified cross fold validation on the following four models due to the large number of categorical variables in my data set: 
+
+* Linear Regression 
+
+* Random Forest 
+
+* Boosted Trees 
+
+* Nearest Neighbors
+
+Due to the size of my training dataset (143999 observations), it took a considerable amount of time for the models to run. Therefore, instead of waiting 8+ hours to view the results, I decided to first start with a "sampling method"; fit the models to a smaller training dataset with a smaller amount of folds. 
+
+As each of these models ran in 2-5 minutes, this allowed for testing on the hyperparameters. For example, I learned that my boosted tree model started to yield a better `rmse` with a larger learning rate.
+
+These are the following steps I took before running the smaller models: 
+
+1. Created a smaller training dataset (720 observations). 
+
+```{r}
+# For testing purposes - before we fit the model to more data 
+duolingo_small <- initial_split(duolingo_train, prop = .995)
+
+duolingo_train_small <- testing(duolingo_small)
+```
+
+2. Folded the smaller training dataset into 5 folds. 
+
+```{r}
+duolingo_folds_small <- vfold_cv(duolingo_train_small, v = 5 , strata = learning_language)
+```
+
+3. Fit the models. 
+
+(Note: This sampling method was used on models that needed tuning. The Linear Regression Model, applied to the entire, dataset took 20 minutes to run therefore it was excluded in this step.)
+
+#### Random Forest 
+
+For the random forest model, I tuned `min_n` and `mtry`, set `trees` to 200, set `mode` to `"regression"` (this is because the outcome variable, `difficulty_rating` is numeric) and set the engine as `ranger`. Finally I stored this model and the recipe into a workflow. 
+
+```{r}
+rf_spec <- 
+  rand_forest(min_n = tune(),
+              mtry = tune(), 
+              trees = 200) %>% 
+  set_engine("ranger") %>% 
+  set_mode("regression")
+
+rf_wkflow <- workflow() %>% 
+  add_model(rf_spec %>% set_args(min_n = tune(),
+              mtry = tune())) %>% 
+  add_recipe(duolingo_recipe)
+```
+
+Next, I set up the tuning grid with 4 levels. After a lot of trial and error I found that a range of 2 to 30 for `mtry` worked well. 30 was selected for the maximum `mtry` range as it was just under the maximum number of columns in my juiced dataset. A range of 30 to 300 was chosen for `min_n` as the model seemed to do better with a larger range. 
+
+```{r}
+# define grid
+rf_grid <- grid_regular(mtry(range=c(2,30)), min_n(range=c(30,300)), levels = 4) 
+```
+
+Then, I executed my model by tuning and fitting. As this was the smaller dataset the process only took 3 minutes. 
+
+```{r}
+random_forest_tune_test <- rf_wkflow %>% 
+  tune_grid(
+    resamples = duolingo_folds_small, 
+    grid = rf_grid) 
+```
+
+Taking a quick look at the autoplot, the model seems to do well with a smaller number of `mtry` (somewhere around 2) and `min_n` (at 30). 
+
+```{r}
+autoplot(random_forest_tune_test, metric = "rmse")
+```
+
+The random forest tuning grid and workflow is now ready to be used on the actual training dataset. 
+
+#### Boosted Trees 
+
+In a similar process, for the boosted trees model, I tuned `min_n`, `mtry`, and `learn_rate`, set `mode` to `"regression"` and the set the engine as `xgboost`. I stored this model and the recipe into a workflow. 
+
+```{r}
+boosted_spec <- boost_tree(min_n = tune(),
+                       mtry = tune(),
+                       learn_rate = tune()) %>%
+  set_engine("xgboost") %>% 
+  set_mode("regression")
+
+boosted_wkflow <- workflow() %>% 
+  add_model(boosted_spec) %>% 
+  add_recipe(duolingo_recipe)
+```
+
+Then, I set up a tuning grid with 4 levels. I used the same range for `mtry` as seen in the random forest model, adjusted `min_n` to a range of 1 to 100 (seemed to do better with a smaller range) and set the `learn_rate` range from -0.5 to -0.1. The model seems to do better with a larger learn rate (smaller ranges would produce no variability - straight lines for each node size). 
+
+```{r}
+# define grid
+boosted_grid <- grid_regular(mtry(range=c(2,30)), min_n(range=c(1,100)),learn_rate(range(-0.5,-0.1)),levels = 4) 
+```
+
+Then, I executed my model by tuning and fitting. As this was the smaller dataset the process only took 4 and a half minutes. 
+
+```{r}
+boosted_tune_test <- boosted_wkflow %>% 
+  tune_grid(
+    resamples = duolingo_folds_small, 
+    grid = boosted_grid
+    )
+```
+
+Taking a quick look at the autoplot, the model seems to do well with a smaller number of `mtry` (somewhere around 2), a larger `min_n` (at 67) and the middle sized learn_rate (0.4298662). 
+
+```{r}
+autoplot(boosted_tune_test, metric = "rmse")
+```
+
+The boosted trees tuning grid and workflow is now ready to be used on the actual training dataset. 
+
+#### Nearest Neighbors 
+
+Lastly, I repeated the same process on the (cross fold validation) nearest neighbor model. For this model I tuned `neighbors` (all other aspects of this model was fine as default). I stored this model and the recipe into a workflow. 
+
+```{r}
+knn_model <- 
+  nearest_neighbor(
+    neighbors = tune(),
+    mode = "regression") %>% 
+  set_engine("kknn")
+
+knn_workflow <- workflow() %>% 
+  add_model(knn_model) %>% 
+  add_recipe(duolingo_recipe)
+```
+
+Then, I set up a tuning grid with 10 levels. I increased the amount of levels for this model as it yielded more interesting results (we are only tuning one thing, `neighbors`). A range of 50 to 150 seemed appropriate (anything larger reduced variability - yielded straight lines). 
+
+```{r}
+# define grid
+knn_grid <- grid_regular(neighbors(range(c(50,150))),levels = 10) 
+```
+
+Then, I executed my model by tuning and fitting. As this was the smaller dataset the process only took 4 minutes. 
+
+```{r}
+knn_tune_test <- knn_workflow %>% 
+  tune_grid(
+    # what will it fit the workflow to
+    resamples = duolingo_folds_small, 
+    # how does it complete the models in those workflows
+            grid = knn_grid)
+```
+
+Taking a quick look at the autoplot, the model seems to do well with a slightly larger `neighbors` value (somewhere around 115). After this value the model starts to do worse. 
+
+```{r}
+autoplot(knn_tune_test, metric = "rmse")
+```
+
+The (cross fold validation) nearest neighbor model tuning grid and workflow is now ready. 
+
+Finally, we are ready to train the models on the original training dataset (143999 observations). 
+
+### Running the Models for Stratified Cross Validation 
+
+Here we are running the following models: 
+
+* Linear Regression 
+
+* Random Forest 
+
+* Boosted Trees 
+
+* Nearest Neighbors
+
+on the original training dataset (143999 observations). 
+
+Recall each of the models tuning grid and workflow (excluding the linear regression model) was created in the smaller sample testing stage. 
+
+#### Linear Regression Model 
+
+I executed the linear regression model by fitting in a process that took only 20 minutes! 
+
+Note there was no tuning done on this model.
+
+```{r eval = FALSE}
+lm_model <- linear_reg() %>% 
+ set_engine("lm")
+
+lm_wkflow <- workflow() %>% 
+ add_recipe(duolingo_recipe) %>% 
+ add_model(lm_model)
+
+lm_fit <- fit(lm_wkflow, duolingo_train)
+```
+
+Though this model was extremely quick, I decided to still save the results and workflow so I would not need to run the above code chunk again. 
+
+```{r eval = FALSE}
+# Write Out Results & Workflow 
+save(lm_fit,lm_wkflow, file = "lm_model.rda")
+```
+
+#### Random Forest 
+
+I executed the random forest model by tuning and fitting (the models tuning grid and workflow was created in the smaller sample testing stage) in a process that took 15 hours! 
+
+```{r eval = FALSE}
+random_forest_tune <- rf_wkflow %>% 
+  tune_grid(
+    resamples = duolingo_folds, 
+    grid = rf_grid 
+```
+
+I saved the results and workflow so I would not need to run the above code chunk again. 
+
+```{r eval = FALSE}
+# Write Out Results & Workflow 
+save(random_forest_tune,rf_wkflow, file = "random_forest_tune.rda")
+```
+
+#### Boosted Trees 
+
+I executed the boosted trees model by tuning and fitting (the models tuning grid and workflow was created in the smaller sample testing stage) in a process that took just under 9 hours.  
+
+```{r eval = FALSE}
+boosted_tune <- boosted_wkflow %>% 
+  tune_grid(
+    resamples = duolingo_folds, 
+    grid = boosted_grid,
+    control = control_grid(verbose = TRUE)
+    )
+```
+
+Again I saved the results and workflow so I would not need to run the above code chunk again. 
+
+```{r eval = FALSE}
+# Write Out Results & Workflow 
+save(boosted_tune, boosted_wkflow, file = "boosted_tune.rda")
+```
+
+#### Nearest Neighbor 
+
+I executed the (cross fold validation) nearest neighbor model by tuning and fitting (the models tuning grid and workflow was created in the smaller sample testing stage). Surprisingly this process only took around 3 hours. I suspect this is because we are only tuning one element in the model. 
+
+```{r eval = FALSE}
+knn_tune <- knn_workflow %>% 
+  tune_grid(
+    # what will it fit the workflow to
+    resamples = duolingo_folds, 
+    # how does it complete the models in those workflows
+            grid = knn_grid)
+```
+
+Finally, I saved the results and workflow so I would not need to run the above code chunk again. 
+
+```{r eval = FALSE}
+# Write Out Results & Workflow 
+save(knn_tune, knn_workflow, file = "knn_tune.rda")
+```
+
+### Stratified Cross Validation Model Analysis 
+
+To prepare, I loaded the results of the four cross validation models (`.rda` files) into my R environment. 
+
+```{r}
+# Load in linear regression model 
+load("data/models/lm_model.rda")
+# Load in random forest model 
+load("data/models/random_forest_tune.rda")
+# Load in boosted trees model 
+load("data/models/boosted_tune.rda")
+# Load in nearest neighbors model 
+load("data/models/knn_tune.rda")
+```
+
+#### Linear Regression 
+
+From the very beginning, I suspected that my dataset did not follow a linear regression model. I still fit this model as I thought it was a good idea to start with the simplest model (this model had no tuning). 
+
+Here I am creating a list of predicted values binded with the actual values: 
+
+```{r}
+lm_res <- predict(lm_fit, new_data = duolingo_train %>% select(-difficulty_rating))
+
+lm_res <- bind_cols(lm_res, duolingo_train %>% select(difficulty_rating))
+lm_res %>% 
+  head()
+```
+
+Then I created a plot; here we confirmed that the data does not a linear regression as it does not follow the line at all. 
+
+```{r}
+lm_res %>% 
+  ggplot(aes(x = .pred, y = difficulty_rating)) +
+  geom_point(alpha = 0.2) +
+  geom_abline(lty = 2) + 
+  theme_bw() +
+  coord_obs_pred()
+```
+
+Using the `metric_set()` function, the `rmse` value is **4.1682235**. This is a good reference point for the `rmse` values as we start to look at the models that had tuning parameters. 
+
+**(Note: The `rmse` is generated in relation to the outcome. A value of around 4 makes sense as the values of `difficulty_rating` range from 74 to 100).**
+
+```{r}
+lm_metrics <- metric_set(rmse, rsq, mae)
+lm_metrics(lm_res, truth = difficulty_rating, 
+                estimate = .pred)
+```
+
+#### Random Forest 
+
+Next we have the random forest model. 
+
+Taking a look at the `auto_plot()` function, it is clear that the `rmse` value decreases as the number of `mtry` increase. It also seems to be doing well on a minimal node size of 138 (this is somewhere in the middle, leaning to thee smaller side). 
+
+```{r}
+autoplot(random_forest_tune, metric = "rmse")
+```
+
+Using the `show_best()` function, the smallest `mean` value for the rmse is **4.097977**, with `mtry = 13` and `min_n = 138`. This is quite good as there was a pretty significant improvement in the mean when compared to the linear regression model. 
+
+Also, this means that on average we were about 4.1 away from the true class difficulty. 
+
+```{r}
+show_best(random_forest_tune, metric = "rmse") %>% select(-.estimator, -.config)
+```
+
+#### Boosted Trees
+
+We then have the random forest model. 
+
+Again, we can take a look using the `auto_plot()` function. As we saw in our smaller sample testing section, this model seems to do better with a larger learn rate. 
+
+```{r eval = FALSE}
+autoplot(boosted_tune, metric = "rmse")
+```
+
+```{r}
+show_best(boosted_tune, metric = "rmse") %>% select(-.estimator, -.config)
+```
+
+Using the `show_best()` function, the smallest `mean` value for the rmse is **4.110080**, with `mtry = 11`,`min_n = 1` and `learn_rate = 0.5843414`.
+
+As suspected, the model did have a smaller rmse value when the learn rate was larger. In addition, I find the `min_n = 1` to be very interesting. This means that the minimum number of data points in a node that are required for the node to be split further was one. 
+
+The boosted trees `mean` is 0.0777967 larger than our random forest model. 
+#### Nearest Neighbors 
+
+Lastly, we have the (cross fold validation) nearest neighbor model. 
+
+We can take a look using the `auto_plot()` function, this shows us that the ideal number of neighbors is 150. When creating the tuning grid, this was the largest value before the model started to do worse. 
+
+We can then confirm this with the `show_best()` function. 
+
+```{r eval = FALSE}
+autoplot(knn_tune, metric = "rmse")
+```
+
+Using the `show_best()` function, the smallest `mean` value for the `rmse` is **4.117364**, with `neighbors = 150` (as we saw in our autoplot).
+
+This did not beat the random forest model or the boosted trees model. 
+
+```{r}
+show_best(knn_tune, metric = "rmse") %>% select(-.estimator, -.config)
+```
+
+We can now produce a table of the best `rmse` values for the four models: 
+
+```{r}
+as.table(matrix(c(4.1758,4.0998,4.1101,4.1174), ncol=1, byrow=FALSE,
+ dimnames=list(Model = c("Linear Regression Model", "Random Forest Model","Boosted Trees Model", "Nearest Neighbors Model"),
+  c("Best RMSE Mean Value"))))
+```
+
+The rankings are: 
+
+1. Random Forest Model
+
+2. Boosted Trees Model
+
+3. Nearest Neighbors Model
+
+4. Linear Regression Model 
+
+Let’s continue with the **Random Forest Model** being the model that performed best.
+
+### Final Model Building 
+
+To prepare, we will create a final workflow that has "tuned" in the name. This will allow for easy identification. We will then finalize the workflow by using the parameters (using the `select_best()` function) from the random forest model. 
+
+```{r}
+random_forest_wkflow_tuned <- rf_wkflow %>% 
+  finalize_workflow(select_best(random_forest_tune, metric = "rmse"))
+```
+
+Read in the entire training dataset we saved from earlier in the project. 
+
+```{r}
+duolingo_train <- read_rds("data/processed/train_modelready.rds")
+```
+
+Run the fit and save the results. 
+
+```{r}
+random_forest_results <- fit(random_forest_wkflow_tuned, duolingo_train)
+```
+
+```{r}
+write_rds(random_forest_results, "data/final_model/random_forest_results.rds")
+```
+
+Saving the results was somewhat of an unnecessary step as it only took minutes to fit; regardless, this is still a good habit! 
+
+### Analysis of the Test Set 
+
+To prepare, bring into the environment our final model and testing dataset. 
+
+Note that since we made some adjustments to the training dataset in the model building stage, here we are making those same changes to the testing dataset. Again, this means removing `history_seen`, `history_correct` (these two variables were used to generate our outcome, `difficulty_rating` -- including these would skew our results) and `surface_form_lemma_pos` (includes information that is exactly the same as variables `surface_form`, `lemma` and `pos`). In addition we want to turn character variables (`learning_language`,`lexeme_string`, `surface_form`, `lemma` and `pos`) into factors.  
+
+```{r}
+# Load Data & Objects -----------------------------------------------------
+final_model <- read_rds("data/final_model/random_forest_results.rds")
+```
+
+```{r}
+# Making the same changes to our testing dataset
+duolingo_test <- duolingo_test %>% 
+  mutate(
+    learning_language = factor(learning_language), 
+    lexeme_string = factor(lexeme_string), 
+    surface_form = factor(surface_form),
+    lemma = factor(lemma),
+    pos = factor(pos)
+    ) %>% 
+  select(-history_seen, -history_correct, -surface_form_lemma_pos)
+```
+
+Now, lets fit the model to the testing data set and create a few stored data sets for some analysis!
+
+To do this we will be using the `last_fit()` function. This function emulates the process where, after determining the best model, the final fit on the entire training set is needed and is then evaluated on the test set.
+
+```{r}
+final_res <- random_forest_wkflow_tuned %>%
+  last_fit(duolingo_split)
+```
+
+```{r}
+final_res %>%
+  collect_metrics()
+```
+
+We can look at the predicted values compared to the difficulty rating. Just from the few observations, they are looking to be pretty close. 
+
+```{r}
+predictions_df <- final_res %>% collect_predictions() %>% arrange(.row)
+head(predictions_df)
+```
+
+Our model returned an `rmse` of **4.1015005** on our testing data. As expected, this value is higher than the training `rmse`; this is because the testing data is a set of values the model has never seen before, it is bound to do a little worse. 
+
+The difference between the training and testing `rmse` is **0.0035235**. This is a very small difference; this means that the model was able to look at the training data, generalize the model, then look at new data and still produce a low `rmse`. 
+
+Overall, this shows that the model did a great job at not overfitting to the training data! 
+
+## Conclusion 
+
+Overall, the analysis above opens the door to more questions that could not be answered with information included in our dataset. This includes the role of wildcards components that were included in the `lexeme_string` (how does a "generic" lexeme without any specific surface form affect the difficultly of the word), the results if all 13 million data points were taken into consideration, the user background (would it be more difficult for someone who was Korean to learn French?) and the length of the words (are shorter words easier to recall than longer words). Further research efforts may be able to analyze these relationships, but for now, it is beyond the scope and time allotment for this project. I do hope to revisit this project in 5 years to see what new changes Duolingo has made to their model and what new discoveries I could make. 
+
+In regards to the testing of the various models, during the small sample testing stage, the (cross fold validation) nearest neighbor model was looking pretty promising as it yielded a good looking `autoplot()` and an `rmse` value that looked to be the smallest (this value was excluded from the report as I did not want to include too many `rmse` values). This however was not the case. After running all four models on the official training dataset (143999 observations), I decided to go with a random forest model as it yielded the smallest `rmse` value. The random forest may have preformed better as is a very versatile model. It can handle categorical features and numerical features with ease (my dataset had a lot of categorical data). The random forest model is also robust to outliers and non-linear data. From the EDA portion, we can see there were was a lot of outliers in each of the predictors; the model handles these outliers by binning them. 
+
+Overall, the Duolingo dataset allowed for unique analysis and the successful  generation of a model that predicts the word difficulty for in one of the six languages. 
+
+<center>
+![](https://media.giphy.com/media/y2uvzUSpNqF2y5zLJi/giphy.gif)
+</center>
+
+_I would like to thank Dr. Katie Coburn for providing invaluable guidance throughout this project. I truly appreciated this opportunity to learn about data science and machine learning beyond the classroom setting._
+
+*Note: A list of references is available in the zipped files.*
