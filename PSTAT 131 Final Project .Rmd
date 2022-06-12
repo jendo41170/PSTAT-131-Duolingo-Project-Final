@@ -1,5 +1,5 @@
 ---
-title: "PSTAT 131 Final: Duolingo"
+title: "Duolingo Data: A Study on Foreign Language Learning"
 author: "Jenny Do" 
 output:
     html_document:
@@ -607,7 +607,6 @@ boosted_grid <- grid_regular(mtry(range=c(2,30)), min_n(range=c(1,100)),learn_ra
 ```
 
 Then, I executed my model by tuning and fitting. As this was the smaller dataset the process only took 4 and a half minutes. 
-
 ```{r}
 boosted_tune_test <- boosted_wkflow %>% 
   tune_grid(
@@ -616,7 +615,7 @@ boosted_tune_test <- boosted_wkflow %>%
     )
 ```
 
-Taking a quick look at the autoplot, the model seems to do well with a smaller number of `mtry` (somewhere around 2), a larger `min_n` (at 67) and the middle sized learn_rate (0.4298662). 
+Taking a quick look at the autoplot, the model seems to do well with a smaller number of `mtry` (somewhere around 2), a larger `min_n` and the middle sized learn_rate (0.4298662). 
 
 ```{r}
 autoplot(boosted_tune_test, metric = "rmse")
@@ -658,7 +657,7 @@ knn_tune_test <- knn_workflow %>%
             grid = knn_grid)
 ```
 
-Taking a quick look at the autoplot, the model seems to do well with a slightly larger `neighbors` value (somewhere around 115). After this value the model starts to do worse. 
+Taking a quick look at the autoplot, the model seems to do well with a slightly larger `neighbors` value (somewhere around 80). After this value the model starts to do worse. 
 
 ```{r}
 autoplot(knn_tune_test, metric = "rmse")
@@ -711,7 +710,6 @@ save(lm_fit,lm_wkflow, file = "lm_model.rda")
 #### Random Forest 
 
 I executed the random forest model by tuning and fitting (the models tuning grid and workflow was created in the smaller sample testing stage) in a process that took 15 hours! 
-
 ```{r eval = FALSE}
 random_forest_tune <- rf_wkflow %>% 
   tune_grid(
@@ -787,7 +785,7 @@ From the very beginning, I suspected that my dataset did not follow a linear reg
 
 Here I am creating a list of predicted values binded with the actual values: 
 
-```{r}
+```{r, message=FALSE, warning = FALSE}
 lm_res <- predict(lm_fit, new_data = duolingo_train %>% select(-difficulty_rating))
 
 lm_res <- bind_cols(lm_res, duolingo_train %>% select(difficulty_rating))
@@ -836,7 +834,7 @@ show_best(random_forest_tune, metric = "rmse") %>% select(-.estimator, -.config)
 
 #### Boosted Trees
 
-We then have the random forest model. 
+We then have the boosted trees model. 
 
 Again, we can take a look using the `auto_plot()` function. As we saw in our smaller sample testing section, this model seems to do better with a larger learn rate. 
 
@@ -853,6 +851,7 @@ Using the `show_best()` function, the smallest `mean` value for the rmse is **4.
 As suspected, the model did have a smaller rmse value when the learn rate was larger. In addition, I find the `min_n = 1` to be very interesting. This means that the minimum number of data points in a node that are required for the node to be split further was one. 
 
 The boosted trees `mean` is 0.0777967 larger than our random forest model. 
+
 #### Nearest Neighbors 
 
 Lastly, we have the (cross fold validation) nearest neighbor model. 
@@ -861,7 +860,7 @@ We can take a look using the `auto_plot()` function, this shows us that the idea
 
 We can then confirm this with the `show_best()` function. 
 
-```{r eval = FALSE}
+```{r}
 autoplot(knn_tune, metric = "rmse")
 ```
 
@@ -973,11 +972,11 @@ Overall, this shows that the model did a great job at not overfitting to the tra
 
 ## Conclusion 
 
-Overall, the analysis above opens the door to more questions that could not be answered with information included in our dataset. This includes the role of wildcards components that were included in the `lexeme_string` (how does a "generic" lexeme without any specific surface form affect the difficultly of the word), the results if all 13 million data points were taken into consideration, the user background (would it be more difficult for someone who was Korean to learn French?) and the length of the words (are shorter words easier to recall than longer words). Further research efforts may be able to analyze these relationships, but for now, it is beyond the scope and time allotment for this project. I do hope to revisit this project in 5 years to see what new changes Duolingo has made to their model and what new discoveries I could make. 
+The analysis above opens the door to more questions that could not be answered with information included in our dataset. This includes the role of wildcards components that were included in the `lexeme_string` (how does a "generic" lexeme without any specific surface form affect the difficultly of the word), the results if all 13 million data points were taken into consideration, the user background (would it be more difficult for someone who was Korean to learn French?) and the length of the words (are shorter words easier to recall than longer words). Further research efforts may be able to analyze these relationships, but for now, it is beyond the scope and time allotment for this project. I do hope to revisit this project in 5 years to see what new changes Duolingo has made to their model and what new discoveries I could make. 
 
 In regards to the testing of the various models, during the small sample testing stage, the (cross fold validation) nearest neighbor model was looking pretty promising as it yielded a good looking `autoplot()` and an `rmse` value that looked to be the smallest (this value was excluded from the report as I did not want to include too many `rmse` values). This however was not the case. After running all four models on the official training dataset (143999 observations), I decided to go with a random forest model as it yielded the smallest `rmse` value. The random forest may have preformed better as is a very versatile model. It can handle categorical features and numerical features with ease (my dataset had a lot of categorical data). The random forest model is also robust to outliers and non-linear data. From the EDA portion, we can see there were was a lot of outliers in each of the predictors; the model handles these outliers by binning them. 
 
-Overall, the Duolingo dataset allowed for unique analysis and the successful  generation of a model that predicts the word difficulty for in one of the six languages. 
+Overall, the Duolingo dataset allowed for unique analysis and the successful  generation of a model that predicts the word difficulty for one of the six languages. 
 
 <center>
 ![](https://media.giphy.com/media/y2uvzUSpNqF2y5zLJi/giphy.gif)
