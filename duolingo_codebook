@@ -1,8 +1,8 @@
-Final Project: Duolingo Codebook (Jenny Do)
+Duolingo Codebook (Jenny Do)
 
 Here is a full copy of the codebook; exposure to these variables will helpful for this report: 
 
-(In format: Defintion (variable type)). 
+(In format: Definition (variable type)). 
 
 * `difficulty_rating` - generated from a ratio of `history_correct` over `history_seen`, it acts as a measure of accuracy for a specific word over all sessions for a particular user and word (unique to each language). Note that since there were multiple users studying the same word for the same language, we took an average over all the words that were the same. In addition, `difficulty_rating` is a percentage that indicates harder difficulty at lower percentages and easier difficulty at higher percentages. More information can be found in the "Creating Difficulty" section (numeric, percentage).
 
